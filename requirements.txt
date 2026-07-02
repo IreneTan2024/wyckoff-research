@@ -1,0 +1,8 @@
+pandas==2.3.3
+numpy==2.0.2
+matplotlib==3.9.2
+mplfinance==0.12.10b0
+openpyxl==3.1.5
+jupyterlab==4.2.5
+tushare==1.4.29
+
