@@ -36,6 +36,9 @@ def detect_macd_swings_by_histogram_group(df, close_col="Close", macd_col="MACD"
     for _, group in data.groupby("group"):
         sign = group["macd_sign"].iloc[0]
 
+        # 每组macd正负方向一致的、相连的日子为一个group。
+        # 对macd大于0的group，找到其收盘价最高的一天，并将这个点标记为当前波段的最高点
+        # 对macd小于0的group，找到其收盘价最低的一天，并将这个点标记为当前波段的最低点
         if sign > 0:
             idx = group[close_col].idxmax()
             direction = "up"
@@ -67,71 +70,9 @@ def detect_macd_swings_by_histogram_group(df, close_col="Close", macd_col="MACD"
             }
         )
 
+    # 相当于只是按macd的正负划分了组，然后找出每个组的最高和最低点来相连。但是怎么说呢，好像也没毛病……就是视角偏事后了。
+
     return points_df, pd.DataFrame(swings), data
-
-
-def detect_macd_swings_paper_rule(df, close_col="Close", macd_col="MACD"):
-    """使用报告文字描述中的更严格规则识别波段。
-
-    参数:
-        df: 已经包含 MACD 列的行情 DataFrame。
-        close_col: 收盘价列名，默认使用 "Close"。
-        macd_col: MACD 柱列名，默认使用 "MACD"。
-
-    返回:
-        波段表，包含 start_date、start_price、end_date、end_price、direction。
-
-    当 MACD 为正，且当前收盘价创浮动起点以来新高时，确认新上涨波段。
-    当 MACD 为负，且当前收盘价创浮动起点以来新低时，确认新下跌波段。
-    """
-    data = df.copy().sort_index()
-    data = data.dropna(subset=[close_col, macd_col])
-    if data.empty:
-        return pd.DataFrame(
-            columns=["start_date", "start_price", "end_date", "end_price", "direction"]
-        )
-
-    swings = []
-    start_date = data.index[0]
-    start_price = data.iloc[0][close_col]
-    last_direction = None
-
-    for idx, row in data.iloc[1:].iterrows():
-        close = row[close_col]
-        macd = row[macd_col]
-        segment = data.loc[start_date:idx]
-
-        if macd > 0 and close >= segment[close_col].max():
-            if last_direction != "up":
-                swings.append(
-                    {
-                        "start_date": start_date,
-                        "start_price": start_price,
-                        "end_date": idx,
-                        "end_price": close,
-                        "direction": "up",
-                    }
-                )
-                last_direction = "up"
-                start_date = idx
-                start_price = close
-
-        elif macd < 0 and close <= segment[close_col].min():
-            if last_direction != "down":
-                swings.append(
-                    {
-                        "start_date": start_date,
-                        "start_price": start_price,
-                        "end_date": idx,
-                        "end_price": close,
-                        "direction": "down",
-                    }
-                )
-                last_direction = "down"
-                start_date = idx
-                start_price = close
-
-    return pd.DataFrame(swings)
 
 
 def swings_to_alines(swings):
