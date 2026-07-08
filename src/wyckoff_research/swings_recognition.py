@@ -88,3 +88,352 @@ def swings_to_alines(swings):
         [(row["start_date"], row["start_price"]), (row["end_date"], row["end_price"])]
         for _, row in swings.iterrows()
     ]
+
+
+def build_current_structure_lines(points_df, df, state_df=None, cutoff_date=None, close_col="Close", merge_pct=0.01, max_horizontal_lines=5):
+    """生成某个截止日期下的当前趋势线和水平线。
+
+    参数:
+        points_df: 波段端点表。
+        df: 行情数据。
+        state_df: 可选的趋势/盘整状态表。
+        cutoff_date: 截止日期，默认使用今天。
+        close_col: 收盘价列名。
+        merge_pct: 水平线合并阈值。
+        max_horizontal_lines: 最多保留的水平线数量。
+
+    返回:
+        lines_df: 当前趋势线和水平线的合并表。
+    """
+    data = get_data_until(df, cutoff_date)
+    if data.empty:
+        return pd.DataFrame()
+
+    extend_to = data.index[-1]
+    trend_lines = build_current_trend_lines(
+        points_df,
+        state_df=state_df,
+        cutoff_date=cutoff_date,
+        extend_to=extend_to,
+    )
+    horizontal_lines = build_current_horizontal_lines(
+        points_df,
+        data,
+        cutoff_date=extend_to,
+        close_col=close_col,
+        merge_pct=merge_pct,
+        max_lines=max_horizontal_lines,
+    )
+
+    lines = [item for item in [trend_lines, horizontal_lines] if not item.empty]
+    if not lines:
+        return pd.DataFrame()
+
+    return pd.concat(lines, ignore_index=True)
+
+
+def build_current_horizontal_lines(points_df, df, cutoff_date=None, close_col="Close", merge_pct=0.01, max_lines=5):
+    """生成某个截止日期下的当前水平支撑/阻力线。
+
+    参数:
+        points_df: 波段端点表。
+        df: 行情数据。
+        cutoff_date: 截止日期，默认使用今天。
+        close_col: 收盘价列名。
+        merge_pct: 水平线合并阈值，默认 1% 以内视为同一价位。
+        max_lines: 最多保留的水平线数量。
+
+    返回:
+        当前截面的水平线表。
+    """
+    data = get_data_until(df, cutoff_date)
+    points = get_points_until(points_df, cutoff_date)
+    if data.empty or points.empty:
+        return pd.DataFrame()
+
+    candidates = []
+    recent_points = points.tail(4)
+    for _, row in recent_points.iterrows():
+        candidates.append(
+            {
+                "date": row["date"],
+                "price": row["price"],
+                "direction": row["direction"],
+                "source": "confirmed",
+            }
+        )
+
+    floating_point = get_floating_extreme_point(points, data, close_col=close_col)
+    if floating_point is not None:
+        candidates.append(floating_point)
+
+    current_close = data[close_col].iloc[-1]
+    merged_levels = merge_level_candidates(candidates, merge_pct=merge_pct)
+
+    lines = []
+    for item in merged_levels:
+        level_price = item["level_price"]
+        if abs(level_price / current_close - 1) < 1e-6:
+            continue
+
+        score = calc_horizontal_line_score(data, level_price, close_col=close_col)
+        line_type = "支撑线" if level_price < current_close else "阻力线"
+
+        lines.append(
+            {
+                "line_kind": "horizontal",
+                "line_type": line_type,
+                "state": np.nan,
+                "start_date": data.index[0],
+                "start_price": level_price,
+                "end_date": data.index[-1],
+                "end_price": level_price,
+                "slope": 0,
+                "score": score,
+                "level_price": level_price,
+                "source_count": item["source_count"],
+                "source_dates": item["source_dates"],
+                "source_types": item["source_types"],
+            }
+        )
+
+    lines_df = pd.DataFrame(lines)
+    if lines_df.empty:
+        return lines_df
+
+    lines_df = lines_df.sort_values("score", ascending=False).head(max_lines)
+    return lines_df.sort_values("level_price", ascending=False).reset_index(drop=True)
+
+
+def get_data_until(df, cutoff_date=None):
+    """按截止日期截取行情数据。
+
+    参数:
+        df: 行情 DataFrame，index 应为日期。
+        cutoff_date: 截止日期，默认使用今天；如果行情数据没有今天，则取今天以前的全部数据。
+
+    返回:
+        截止日期以前的行情数据。
+    """
+    data = df.copy()
+    data.index = pd.to_datetime(data.index)
+    data = data.sort_index()
+
+    if cutoff_date is None:
+        cutoff = pd.Timestamp.today().normalize()
+    else:
+        cutoff = pd.Timestamp(cutoff_date)
+
+    return data[data.index <= cutoff].copy()
+
+
+def get_points_until(points_df, cutoff_date=None):
+    """按截止日期截取波段端点。"""
+    points = points_df.copy()
+    if points.empty:
+        return points
+
+    points["date"] = pd.to_datetime(points["date"])
+    points = points.sort_values("date").reset_index(drop=True)
+
+    if cutoff_date is None:
+        cutoff = pd.Timestamp.today().normalize()
+    else:
+        cutoff = pd.Timestamp(cutoff_date)
+
+    return points[points["date"] <= cutoff].copy().reset_index(drop=True)
+
+
+def merge_level_candidates(candidates, merge_pct=0.01):
+    """合并价格接近的候选水平线。"""
+    if not candidates:
+        return []
+
+    candidates = sorted(candidates, key=lambda item: item["price"])
+    groups = []
+
+    for item in candidates:
+        if not groups:
+            groups.append([item])
+            continue
+
+        group_prices = [member["price"] for member in groups[-1]]
+        group_price = sum(group_prices) / len(group_prices)
+        if abs(item["price"] / group_price - 1) <= merge_pct:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+
+    merged = []
+    for group in groups:
+        level_price = sum(item["price"] for item in group) / len(group)
+        merged.append(
+            {
+                "level_price": level_price,
+                "source_count": len(group),
+                "source_dates": [item["date"] for item in group],
+                "source_types": [item["source"] for item in group],
+            }
+        )
+
+    return merged
+
+
+def get_floating_extreme_point(points, data, close_col="Close"):
+    """取当前未确认波段的浮动极值点。"""
+    if points.empty or data.empty:
+        return None
+
+    last_point = points.iloc[-1]
+    segment = data[data.index >= last_point["date"]]
+    if segment.empty:
+        return None
+
+    if last_point["direction"] == "down":
+        idx = segment[close_col].idxmax()
+        direction = "up"
+    else:
+        idx = segment[close_col].idxmin()
+        direction = "down"
+
+    return {
+        "date": idx,
+        "price": segment.loc[idx, close_col],
+        "direction": direction,
+        "source": "floating",
+    }
+
+
+def calc_horizontal_line_score(df, level_price, close_col="Close", min_distance=1e-6):
+    """计算某条水平线的确认度。
+
+    参数:
+        df: 行情数据。
+        level_price: 水平线价位。
+        close_col: 收盘价列名。
+        min_distance: 最小距离，避免收盘价正好等于水平线时除以 0。
+
+    返回:
+        水平线确认度。
+    """
+    distance_pct = (df[close_col] / level_price - 1).abs() * 100
+    distance_pct = distance_pct.clip(lower=min_distance)
+    return (1 / distance_pct).clip(upper=10).sum()
+
+
+def build_current_trend_lines(points_df, state_df=None, cutoff_date=None, extend_to=None):
+    """生成某个截止日期下的当前趋势线。
+
+    参数:
+        points_df: 波段端点表。
+        state_df: 可选的趋势/盘整状态表；不传则根据 points_df 重新计算。
+        cutoff_date: 截止日期，默认使用今天。
+        extend_to: 趋势线向右延伸到的日期，默认等于截止日期或最后一个端点日期。
+
+    返回:
+        当前截面的趋势线表。
+
+    上涨趋势下生成需求线和超买线。
+    下跌趋势下生成供给线和超卖线。
+    盘整状态下暂不生成斜趋势线。
+    """
+    points = get_points_until(points_df, cutoff_date)
+    if points.empty:
+        return pd.DataFrame()
+
+    if extend_to is None:
+        if cutoff_date is None:
+            extend_to = points["date"].max()
+        else:
+            extend_to = pd.Timestamp(cutoff_date)
+
+    else:
+        states = state_df.copy()
+        if not states.empty:
+            states["date"] = pd.to_datetime(states["date"])
+            states = states[states["date"] <= pd.Timestamp(extend_to)]
+
+    if states.empty:
+        return pd.DataFrame()
+
+    state = states.sort_values("date").iloc[-1]["state"]
+    lines = []
+
+    if state == "上涨趋势":
+        bottoms = points[points["direction"] == "down"].tail(2)
+        if len(bottoms) < 2:
+            return pd.DataFrame()
+
+        bottom1 = bottoms.iloc[0]
+        bottom2 = bottoms.iloc[1]
+        lines.append(make_sloped_line("需求线", state, bottom1, bottom2, extend_to))
+
+        tops_between = points[
+            (points["direction"] == "up")
+            & (points["date"] >= bottom1["date"])
+            & (points["date"] <= bottom2["date"])
+        ]
+        if not tops_between.empty:
+            top = tops_between.loc[tops_between["price"].idxmax()]
+            lines.append(make_sloped_line("超买线", state, bottom1, bottom2, extend_to, top))
+
+    elif state == "下跌趋势":
+        tops = points[points["direction"] == "up"].tail(2)
+        if len(tops) < 2:
+            return pd.DataFrame()
+
+        top1 = tops.iloc[0]
+        top2 = tops.iloc[1]
+        lines.append(make_sloped_line("供给线", state, top1, top2, extend_to))
+
+        bottoms_between = points[
+            (points["direction"] == "down")
+            & (points["date"] >= top1["date"])
+            & (points["date"] <= top2["date"])
+        ]
+        if not bottoms_between.empty:
+            bottom = bottoms_between.loc[bottoms_between["price"].idxmin()]
+            lines.append(make_sloped_line("超卖线", state, top1, top2, extend_to, bottom))
+
+    return pd.DataFrame(lines)
+
+
+def make_sloped_line(line_type, state, anchor1, anchor2, extend_to, through_point=None):
+    """根据两个端点生成趋势线，或生成一条经过指定点的平行线。"""
+    date1 = pd.Timestamp(anchor1["date"])
+    date2 = pd.Timestamp(anchor2["date"])
+    price1 = anchor1["price"]
+    price2 = anchor2["price"]
+    days = max((date2 - date1).days, 1)
+    slope = (price2 - price1) / days
+
+    if through_point is None:
+        start_date = date1
+        start_price = price1
+    else:
+        start_date = date1
+        through_date = pd.Timestamp(through_point["date"])
+        through_price = through_point["price"]
+        start_price = through_price - slope * (through_date - start_date).days
+
+    end_date = pd.Timestamp(extend_to)
+    end_price = calc_line_price(start_date, start_price, end_date, slope)
+
+    return {
+        "line_kind": "trend",
+        "line_type": line_type,
+        "state": state,
+        "start_date": start_date,
+        "start_price": start_price,
+        "end_date": end_date,
+        "end_price": end_price,
+        "slope": slope,
+        "score": np.nan,
+        "level_price": np.nan,
+    }
+
+
+def calc_line_price(start_date, start_price, end_date, slope):
+    """根据起点、斜率和目标日期计算趋势线价格。"""
+    days = (pd.Timestamp(end_date) - pd.Timestamp(start_date)).days
+    return start_price + slope * days
