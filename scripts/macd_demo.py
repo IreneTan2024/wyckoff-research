@@ -65,4 +65,4 @@ def main(start_date, end_date, ts_code):
 
 
 if __name__ == "__main__":
-    main(ts_code="603993.SH", start_date="20250808", end_date="20260630")
+    main(ts_code="601899.SH", start_date="20250808", end_date="20260630")

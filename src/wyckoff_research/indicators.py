@@ -67,13 +67,38 @@ def update_state_with_latest_price(points_df, df, close_col="Close"):
     return latest_state
 
 
-def classify_market_state(points_df):
+def compare_price_level(price_prev, price_curr, tolerance_pct=0.005):
+    """比较两个价位的关系：up、down、flat。
+
+    参数:
+        price_prev: 前一个端点价格。
+        price_curr: 后一个端点价格。
+        tolerance_pct: 容忍阈值，默认 0.5%。
+
+    返回:
+        "up"、"down" 或 "flat"。
+    """
+    change_pct = price_curr / price_prev - 1
+
+    if change_pct > tolerance_pct:
+        return "up"
+    elif change_pct < -tolerance_pct:
+        return "down"
+    else:
+        return "flat"
+
+
+def classify_market_state(points_df, tolerance_pct=0.005):
     """根据最近 4 个波段端点判断趋势或盘整状态。
 
     参数:
         points_df: 波段端点表，至少包含 date、price、direction 三列。
                    direction 为 "up" 的点视为顶端点，
                    direction 为 "down" 的点视为底端点。
+
+                   顶/底变化小于 0.5%：视为 flat
+                   但最终仍然只输出：
+                   上涨趋势、下跌趋势、收缩盘整、扩张盘整
 
     返回:
         state_df: 每个可判断位置对应的市场状态表。
@@ -97,18 +122,25 @@ def classify_market_state(points_df):
         bottom_prev = bottoms.iloc[0]
         bottom_curr = bottoms.iloc[1]
 
-        top_up = top_curr["price"] > top_prev["price"]
-        top_down = top_curr["price"] < top_prev["price"]
-        bottom_up = bottom_curr["price"] > bottom_prev["price"]
-        bottom_down = bottom_curr["price"] < bottom_prev["price"]
+        top_relation = compare_price_level(
+            top_prev["price"],
+            top_curr["price"],
+            tolerance_pct=tolerance_pct,
+        )
 
-        if top_up and bottom_up:
+        bottom_relation = compare_price_level(
+            bottom_prev["price"],
+            bottom_curr["price"],
+            tolerance_pct=tolerance_pct,
+        )
+
+        if top_relation in ["up", "flat"] and bottom_relation == "up":
             state = "上涨趋势"
-        elif top_down and bottom_down:
+        elif top_relation in ["down", "flat"] and bottom_relation == "down":
             state = "下跌趋势"
-        elif top_down and bottom_up:
+        elif top_relation == "down" and bottom_relation in ["up", "flat"]:
             state = "收缩盘整"
-        elif top_up and bottom_down:
+        elif top_relation == "up" and bottom_relation in ["down", "flat"]:
             state = "扩张盘整"
         else:
             state = "无法判断"

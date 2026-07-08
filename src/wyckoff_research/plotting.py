@@ -8,6 +8,10 @@ import matplotlib.pyplot as plt
 from .data import OHLCV_COLUMNS
 from .swings_recognition import swings_to_alines
 
+from matplotlib.font_manager import FontProperties
+
+CN_FONT = FontProperties(fname="/System/Library/Fonts/STHeiti Medium.ttc")
+
 plt.rcParams["font.sans-serif"] = ["Arial Unicode MS", "PingFang SC", "Heiti TC"]
 plt.rcParams["axes.unicode_minus"] = False
 
@@ -202,6 +206,7 @@ def plot_kline_with_swings2(df, swings=None, state_df=None, title="MACD swing de
                 va=va,
                 fontsize=12,
                 fontweight="bold",
+                fontproperties=CN_FONT,
                 color="black",
                 arrowprops={
                     "arrowstyle": "->",
@@ -216,13 +221,15 @@ def plot_kline_with_swings2(df, swings=None, state_df=None, title="MACD swing de
     return fig, axes
 
 
-def draw_structure_lines(price_ax, df, structure_lines):
+def draw_structure_lines(price_ax, df, structure_lines, trend_extend_bars=20, horizontal_extend_bars=3):
     """在主图上绘制趋势线和水平线。
 
     参数:
         price_ax: K 线主图坐标轴。
         df: 行情数据，index 为日期。
         structure_lines: 趋势线和水平线表。
+        trend_extend_bars: 趋势线向右额外延伸的 K 线数量。
+        horizontal_extend_bars: 水平线向右额外延伸的 K 线数量。
     """
     if structure_lines is None or structure_lines.empty:
         return
@@ -240,12 +247,23 @@ def draw_structure_lines(price_ax, df, structure_lines):
     }
 
     for _, row in structure_lines.iterrows():
-        x1 = get_plot_x(plot_df, row["start_date"])
-        x2 = get_plot_x(plot_df, row["end_date"])
-        y1 = row["start_price"]
-        y2 = row["end_price"]
         line_type = row["line_type"]
         line_kind = row["line_kind"]
+
+        if line_kind == "horizontal":
+            x1 = get_source_start_x(plot_df, row.get("source_dates"), row["start_date"])
+            x2 = get_plot_x(plot_df, row["end_date"]) + horizontal_extend_bars
+            y1 = row["start_price"]
+            y2 = row["end_price"]
+        else:
+            trend_lookback_bars = 40
+
+            x1_original = get_plot_x(plot_df, row["start_date"])
+            x1 = max(x1_original - trend_lookback_bars, 0)
+            x2 = get_plot_x(plot_df, row["end_date"]) + trend_extend_bars
+
+            y1 = row["start_price"] - row["slope"] * trend_lookback_bars
+            y2 = calc_extended_price(row, trend_extend_bars)
 
         linestyle = "--" if line_kind == "horizontal" else "-"
         linewidth = 1.1 if line_kind == "horizontal" else 1.4
@@ -262,7 +280,7 @@ def draw_structure_lines(price_ax, df, structure_lines):
         )
 
         if line_kind == "horizontal":
-            label = f'{row["score"]:.1f}'
+            label = f'{row["score"]:.1f} {line_type}'
         else:
             label = line_type
 
@@ -271,10 +289,15 @@ def draw_structure_lines(price_ax, df, structure_lines):
             y2,
             label,
             fontsize=8,
+            fontproperties=CN_FONT,
             color=color,
             ha="left",
             va="center",
         )
+
+    current_left, current_right = price_ax.get_xlim()
+    right_padding = max(trend_extend_bars, horizontal_extend_bars, 0) + 2
+    price_ax.set_xlim(current_left, max(current_right, len(plot_df) - 1 + right_padding))
 
 
 def get_plot_x(df, date):
@@ -291,7 +314,7 @@ def get_plot_x(df, date):
     return position
 
 
-def plot_kline_with_swings3(df, swings=None, structure_lines=None, title="MACD swing detection", show_volume=True, show_macd=True, figsize=(10, 6)):
+def plot_kline_with_swings3(df, swings=None, structure_lines=None, title="MACD swing detection", show_volume=True, show_macd=True, figsize=(15, 10), trend_extend_bars=40, horizontal_extend_bars=10):
     """绘制 K 线图，并可选叠加成交量、MACD 柱、波段线和结构线。
 
     参数:
@@ -302,6 +325,8 @@ def plot_kline_with_swings3(df, swings=None, structure_lines=None, title="MACD s
         show_volume: 是否显示成交量子图。
         show_macd: 是否显示 MACD 柱子图。
         figsize: 图表尺寸。
+        trend_extend_bars: 趋势线向右额外延伸的 K 线数量。
+        horizontal_extend_bars: 水平线向右额外延伸的 K 线数量。
 
     返回:
         fig, axes: matplotlib 图对象和坐标轴对象。
@@ -340,7 +365,13 @@ def plot_kline_with_swings3(df, swings=None, structure_lines=None, title="MACD s
         **kwargs,
     )
 
-    draw_structure_lines(axes[0], plot_df, structure_lines)
+    draw_structure_lines(
+        axes[0],
+        plot_df,
+        structure_lines,
+        trend_extend_bars=trend_extend_bars,
+        horizontal_extend_bars=horizontal_extend_bars,
+    )
     plt.show()
 
     return fig, axes
@@ -366,3 +397,29 @@ def get_data_until(df, cutoff_date=None):
         cutoff = pd.Timestamp(cutoff_date)
 
     return data[data.index <= cutoff].copy()
+
+
+def get_source_start_x(df, source_dates, fallback_date):
+    """根据水平线来源端点计算起始横轴位置。"""
+    if not isinstance(source_dates, list) or not source_dates:
+        x = get_plot_x(df, fallback_date)
+    else:
+        dates = [pd.Timestamp(date) for date in source_dates]
+        start_date = min(dates)
+        x = get_plot_x(df, start_date)
+
+    return max(x - 20, 0)
+
+
+def calc_extended_price(row, extra_bars):
+    """根据趋势线斜率估算向右延伸后的价格。"""
+    if row["line_kind"] != "trend":
+        return row["end_price"]
+
+    start_date = pd.Timestamp(row["start_date"])
+    end_date = pd.Timestamp(row["end_date"])
+    days = max((end_date - start_date).days, 1)
+    price_per_bar = (row["end_price"] - row["start_price"]) / days
+    return row["end_price"] + price_per_bar * extra_bars
+
+
